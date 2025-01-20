@@ -172,7 +172,7 @@ void handle_sigint(int sig) {
         stop_program = 1;
         crt_client = 1;
         flg_ewak = 1;
-        printf(RED"\n      EWAKUACJA\n\n"RESET);
+        printf(RED"\n      EWAKUACJA"RESET"\n\n");
         printf(GREEN"Klienci odkladaja towary i opuszczaja sklep"RESET"\n");
     }
     //signal2 dla klienta dziala inaczej
@@ -426,6 +426,9 @@ void *client_thread(void *arg) {
             perror("semctl IPC_RMID failed");
             exit(1);
         }
+    }
+    if(stop_program == 1){
+        printf(YELLOW"Klient %d opuszcza piekarnie\n"RESET,client_data->client_id);
     }
     //Mutex sync, zwolnienie klienta po obsluzeniu przez kasjer.c
     pthread_mutex_lock(&clients_mutex);

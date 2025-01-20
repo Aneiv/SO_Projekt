@@ -366,7 +366,7 @@ void handle_sigint(int sig) {
     //Obsluga sygnalu kierownika signal1
     if(sig == SIGUSR1){
         stop_program = 1;
-        printf(RED"\n      EWAKUACJA\n\n"RESET);
+        printf(RED"\n      EWAKUACJA"RESET"\n\n");
         printf(GREEN"Piekarz opuszcza sklep\n"RESET);
 
         // Usuniecie potokow podajnikow

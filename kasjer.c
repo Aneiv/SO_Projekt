@@ -12,6 +12,7 @@
 #include <signal.h>
 #include <sys/sem.h>
 #include <errno.h>
+#include <wait.h>
 
 //kolorowanie wierszy
 #define RESET   "\033[0m"
@@ -26,7 +27,7 @@
 #define CASHIER_AM 3     // Ilosc max kasjerow
 #define SEM_PRICES 999   // klucz do semafora do wylaczenia pamieci dzielonej z cenami po odczycie przez kasjer.c
 #define PID_SHM 555      // pamiec dzielona na pidy dla kierownik.c
-
+#define STALLS_PROCES_SHM 23 //pamiec na dane kas dzielona
 // Funkcja do operacji sem_wait (czekanie na semafor)
 void sem_wait_op(int semid) {
     struct sembuf sops;
@@ -81,6 +82,7 @@ typedef struct {
     int stall_id; //id kasy
     float stall_total_price; //calkowita kwota uzyskana przez kase
     Product product[NUM_PRODUCTS];
+    Dispenser cennik[NUM_PRODUCTS];
 } Cashier_stall;
 
 Cashier_stall cashier_stall[CASHIER_AM];           // Inicjalizacja kas - kazda kasa liczy sprzedane towary i zyski oddzielnie
@@ -113,8 +115,10 @@ int flg_ewak = 0;
 Dispenser *dispensers;
 //Struktura na zapisane dane z pamieci
 Dispenser local_dispensers[NUM_PRODUCTS];
-pthread_t *cashiers_threads;           // Tablica watkow dla kasjerow
-
+pid_t cashier_pids[CASHIER_AM];  //tablica pidow kasjerow
+//wskaznik do pamieci dzielonej dla danych kas
+Cashier_stall *shared_cashier_stall;
+int stalls_data_shm_id; // id pamieci dzielonej dla danych kas
 // Obsługa sygnału SIGINT (Ctrl+C)
 void handle_sigint(int sig) {
     if(sig == SIGINT){
@@ -126,44 +130,61 @@ void handle_sigint(int sig) {
             for(int i = 0; i<CASHIER_AM;i++){
                 printf(YELLOW"\nKasa_%d"RESET"\n",i+1);
                 for(int j=0; j<NUM_PRODUCTS;j++){
-                    printf("Produkt %d   sprzedana ilosc:%d    calkowity koszt:%0.2f \n",j+1,cashier_stall[i].product[j].sold_amount,cashier_stall[i].product[j].total_price);
-                    cashier_stall[i].stall_total_price += cashier_stall[i].product[j].total_price;
+                    printf("Produkt %d   sprzedana ilosc:%d    calkowity koszt:%0.2f \n",j+1,shared_cashier_stall[i].product[j].sold_amount,shared_cashier_stall[i].product[j].total_price);
+                    shared_cashier_stall[i].stall_total_price += shared_cashier_stall[i].product[j].total_price;
                 }
-            printf("Calkowita kwota uzyskana przez "YELLOW"Kasa_%d"RESET" wynosi: "GREEN"%0.2f"RESET"\n",i+1,cashier_stall[i].stall_total_price);
+            printf("Calkowita kwota uzyskana przez "YELLOW"Kasa_%d"RESET" wynosi: "GREEN"%0.2f"RESET"\n",i+1,shared_cashier_stall[i].stall_total_price);
             }
         }
-        // Zatrzymanie watkow kasjerow
         for (int i = 0; i < CASHIER_AM; i++) {
-            pthread_cancel(cashiers_threads[i]);
-            pthread_join(cashiers_threads[i], NULL);  // Czekanie na zakonczenie watkow
+            kill(cashier_pids[i], SIGTERM);  // Wysyłanie sygnału zakończenia do każdego kasjera
+            waitpid(cashier_pids[i], NULL, 0);  // Czekanie na zakończenie
         }
-
         // Usuniecie potokow
         for (int i = 0; i < CASHIER_AM; i++) {
-            unlink(cashier_stall[i].stall_name);  // Usuwamy FIFO
+            unlink(shared_cashier_stall[i].stall_name);  // Usuwamy FIFO
         }
-        free(cashiers_threads);  // Zwolnienie pamieci
+        //Odlaczanie pamieci dzielonej kas
+        if(shmdt(shared_cashier_stall) == -1){
+            perror("shmdt");
+            exit(1);
+        }
+        //Usuwanie pamieci dzielonej kas
+        if(shmctl(stalls_data_shm_id, IPC_RMID,NULL) == -1){
+            perror("shmctl");
+            exit(1);
+        }
         exit(0);  // Zakonczenie programu
     }
     //obsluga sygnalu kierownika signal1 (ewakuacja)
     if(sig == SIGUSR1){
         stop_program = 1;
-        printf(RED"\n      EWAKUACJA\n\n"RESET);
-        // Zatrzymanie watkow kasjerow
+        printf(RED"\n      EWAKUACJA"RESET"\n\n");
+
         for (int i = 0; i < CASHIER_AM; i++) {
-            pthread_cancel(cashiers_threads[i]);
-            pthread_join(cashiers_threads[i], NULL);  // Czekanie na zakonczenie watkow
+            kill(cashier_pids[i], SIGTERM);  // Wysyłanie sygnału zakończenia do każdego kasjera
+            waitpid(cashier_pids[i], NULL, 0);  // Czekanie na zakończenie
         }
         // Usuniecie potokow
         for (int i = 0; i < CASHIER_AM; i++) {
-            unlink(cashier_stall[i].stall_name);  // Usuwamy FIFO
+            unlink(shared_cashier_stall[i].stall_name);  // Usuwamy FIFO
         }
-        free(cashiers_threads);  // Zwolnienie pamieci
+        //Odlaczanie pamieci dzielonej kas
+        if(shmdt(shared_cashier_stall) == -1){
+            perror("shmdt");
+            exit(1);
+        }
+        //Usuwanie pamieci dzielonej kas
+        if(shmctl(stalls_data_shm_id, IPC_RMID,NULL) == -1){
+            perror("shmctl");
+            exit(1);
+        }
+        printf(GREEN"Kasjerzy opuszczaja sklep\n"RESET);
         exit(0);  // Zakonczenie programu
     }
     //obsluga sygnalu kierownika signal2
     if(sig == SIGUSR2){
-        printf(YELLOW"\n      Otrzymano sygnal o inwenteryzacji\n\n"RESET);
+        printf(YELLOW"\n      Otrzymano sygnal o inwenteryzacji"RESET"\n\n");
         //wyswietlenie stanu kas
         flg_inwent = 1; //zmiana tej flagi powoduje inne zachowanie w przypadku zakonczenia programu
     }
@@ -189,9 +210,9 @@ int init_cashier_stalls() {
     }
 }
 
-// Funkcja kasjera - dodawanie produktow klientow do lokalnej listy i liczenie zyskow
+// Funkcja kasjera - dodawanie produktow klientow do listy i liczenie zyskow w pamieci dzielonej z innymi kasjerami
 // Ustawia semafory klientow - co umozliwia klientom zwolnienie swoich fifo i swoich semaforow
-void *cashier_thread(void *arg) {
+void *cashier_process(void *arg) {
     char client_fifo_path[64]; // Sciezka do potoku klienta
 
     Cashier_stall *cashier_stall = (Cashier_stall *)arg;
@@ -283,8 +304,9 @@ void *cashier_thread(void *arg) {
 	        if(client_data.products_purchased[i] > 0){
                 //wypisanie ile produktow danego typu kupiono
                 printf("  Produkt "YELLOW"%d"RESET": "GREEN"%d\n"RESET, i + 1, client_data.products_purchased[i]);
-
-                float product_cost  = local_dispensers[i].price * (float)client_data.products_purchased[i];
+                //cashier_stall->cennik[i].price
+                //local_dispensers[i].price 
+                float product_cost  = cashier_stall->cennik[i].price * (float)client_data.products_purchased[i];
                 cli_cart_cost += product_cost;
                 printf(GREEN"    Koszt produktow: %0.2f\n"RESET,product_cost);
                 //zapis kosztu i ilosci do struktury
@@ -292,7 +314,7 @@ void *cashier_thread(void *arg) {
                 cashier_stall->product[i].sold_amount += client_data.products_purchased[i];
 	        }
         }
-        printf(GREEN"Calkowity koszt koszyka klienta: %0.2f\n\n"RESET,cli_cart_cost);
+        printf(GREEN"Calkowity koszt koszyka klienta: %0.2f"RESET"\n\n",cli_cart_cost);
         //zamkniecie potoku
         close(client_fifo_fd);
         //dostep do semafora klienta
@@ -388,13 +410,25 @@ int main() {
     for(int i = 0; i<NUM_PRODUCTS;i++){
 	    local_dispensers[i] = dispensers[i];//kopiowanie danych z pamieci
     }
-    printf("Odczytywanie danych z piekarz, wczytanych przez kasjera \n");
-    for (int i = 0; i < NUM_PRODUCTS; i++) {
-        printf("Podajnik %d:\n", i + 1);
-        printf("  sciezka FIFO: %s\n", local_dispensers[i].fifo_path);
-        printf("  Poczatkowy stan: %d\n", local_dispensers[i].initial_stock);
-        printf("  Cena: %.2f\n", local_dispensers[i].price);
+    //zapis do struktury kasy informacji o cenach
+    for(int j = 0; j<CASHIER_AM; j++){
+        for(int i = 0; i<NUM_PRODUCTS; i++){
+            cashier_stall[j].cennik[i] = local_dispensers[i];
+        }
     }
+    printf("\n"BLUE"Kasjerzy odczytali dane o cenach"RESET"\n");
+    //Testowy odczyt danych
+    //printf("Odczytywanie danych ze struktury kas: \n");
+    //for(int j = 0; j<CASHIER_AM; j++){
+    //    printf("\n Kasa %d",j+1);
+    //    for (int i = 0; i < NUM_PRODUCTS; i++) {
+    //        printf("Podajnik %d:\n", i + 1);
+    //        printf("  sciezka FIFO: %s\n", cashier_stall[j].cennik[i].fifo_path);
+    //        printf("  Poczatkowy stan: %d\n", cashier_stall[j].cennik[i].initial_stock);
+    //        printf("  Cena: %.2f\n", cashier_stall[j].cennik[i].price);
+    //    }
+    //}
+
     // Tworzenie watkow dla kasjerow
     //tworzenie semafora dla usuniecia pamieci po odczycie danych
     int prices_sem = semget(SEM_PRICES,1,0600);
@@ -410,25 +444,44 @@ int main() {
     //zmiana wartosci semafora piekarz.c - piekarz moze usunac pamiec, tzn. kasjer odcztal dane i juz nie jest potrzebna
     sem_post_op(prices_sem);
 
-    cashiers_threads = (pthread_t *)malloc(CASHIER_AM * sizeof(pthread_t));
+    //tworzenie pamieci dzielonej na dane kas dla kasjerow
+    stalls_data_shm_id = shmget(STALLS_PROCES_SHM, sizeof(Cashier_stall) * CASHIER_AM, IPC_CREAT | 0600);
+    shared_cashier_stall = (Cashier_stall *)shmat(stalls_data_shm_id, NULL, 0);
+    //zapis danych do pamieci
+    memcpy(shared_cashier_stall,cashier_stall,sizeof(cashier_stall));
+
+
     for (int i = 0; i < CASHIER_AM; i++) {
-        cashier_stall[i].stall_id = i+1;
-        //zerowanie lacznego zysku z produktow przy inicjalizacji
-	    memset(cashier_stall[i].product,0,sizeof(cashier_stall[i].product));
-        pthread_create(&cashiers_threads[i], NULL, cashier_thread, &cashier_stall[i]);
+        shared_cashier_stall[i].stall_id = i + 1;
+        memset(shared_cashier_stall[i].product, 0, sizeof(shared_cashier_stall[i].product));
+
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Proces potomny
+            Cashier_stall *child_cashier_stalls = (Cashier_stall *)shmat(stalls_data_shm_id, NULL, 0);
+            if (child_cashier_stalls == (void *)-1) {
+                perror("shmat failed in child");
+                exit(1);
+            }
+            cashier_process(&child_cashier_stalls[i]);
+        } else if (pid > 0) {
+            cashier_pids[i] = pid;
+        } else {
+            perror("Fork error");
+            exit(EXIT_FAILURE);
+        }
     }
     // Program dziala w tle, kasjerzy gotowi do czytania
-    printf(BLUE"Kasjer: Program uruchomiony. Naciśnij Ctrl+C, aby zakończyć.\n"RESET);
+    printf(BLUE"Kasjer: Program uruchomiony. Naciśnij Ctrl+C, aby zakończyć."RESET"\n");
 
     // Program bedzie dzialal do momentu, gdy nie otrzyma sygnalu SIGINT - lub sygnalu zamkniecia od kierownik.c
     while (!stop_program) {
         sleep(1);  // Glowna petla czeka na sygnal zakonczenia
     }
-    // Sprzatanie przed zakonczeniem
-    free(cashiers_threads);  // Zwolnienie pamieci
+
     // Usuniecie potokow kasjerow (kas)
     for (int i = 0; i < CASHIER_AM; i++) {
-        unlink(cashier_stall[i].stall_name);  // Usuwamy FIFO
+        unlink(shared_cashier_stall[i].stall_name);  // Usuwamy FIFO
     }
 
     printf(GREEN"Kasjer: Program zakonczony.\n"RESET);
