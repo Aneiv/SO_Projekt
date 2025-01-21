@@ -78,6 +78,8 @@ int stalls_id;
 // Funkcja obslugi sygnalu SIGINT (Ctrl+C) (ewakuacja - wysyla sygnal ewakuacji do reszty procesow)
 void handle_sigint(int sig) {
     if(sig == SIGINT){
+        //w razie zatrzymania w trakcie przekroczenia max kli. w piekarni
+        ctl_m_stalls->tmp_stop = 0;
         printf(RED"\n\nEWAKUACJA - awaryjne zamkniecie piekarni\n\n"RESET);
         if (kill(localPids.klient, SG1) == -1) {
             perror("Nie udalo się wyslac sygnalu");
